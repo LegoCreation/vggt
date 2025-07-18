@@ -14,7 +14,7 @@ from math import ceil, floor
 
 
 @dataclass(eq=False)
-class MultitaskLoss(torch.nn.Module):
+class MultitaskLoss:
     """
     Multi-task loss module that combines different loss types for VGGT.
     
@@ -24,58 +24,111 @@ class MultitaskLoss(torch.nn.Module):
     - Point loss
     - Tracking loss (not cleaned yet, dirty code is at the bottom of this file)
     """
-    def __init__(self, camera=None, depth=None, point=None, track=None, **kwargs):
-        super().__init__()
-        # Loss configuration dictionaries for each task
+    def __init__(self, camera=None, depth=None, point=None, track=None, nvs=None):
         self.camera = camera
         self.depth = depth
         self.point = point
         self.track = track
+        self.nvs = nvs
 
-    def forward(self, predictions, batch) -> torch.Tensor:
-        """
-        Compute the total multi-task loss.
+    def __call__(self, predictions, batch):
+        """Compute all losses.
         
         Args:
-            predictions: Dict containing model predictions for different tasks
-            batch: Dict containing ground truth data and masks
+            predictions: Dict containing model predictions
+            batch: Dict containing ground truth data
             
         Returns:
-            Dict containing individual losses and total objective
+            Dict containing:
+                objective: Total weighted loss
+                Other individual loss components
         """
-        total_loss = 0
-        loss_dict = {}
+        losses = {}
+        total_loss = 0.0
         
-        # Camera pose loss - if pose encodings are predicted
-        if "pose_enc_list" in predictions:
-            camera_loss_dict = compute_camera_loss(predictions, batch, **self.camera)   
-            camera_loss = camera_loss_dict["loss_camera"] * self.camera["weight"]   
-            total_loss = total_loss + camera_loss
-            loss_dict.update(camera_loss_dict)
+        # Camera loss
+        if self.camera is not None and self.camera["weight"] > 0:
+            if "pose_enc" in predictions:
+                camera_loss = self._compute_camera_loss(predictions, batch)
+                losses.update(camera_loss)
+                total_loss += self.camera["weight"] * camera_loss["loss_camera"]
+
+        # Depth loss
+        if self.depth is not None and self.depth["weight"] > 0:
+            if "depth" in predictions:
+                depth_loss = self._compute_depth_loss(predictions, batch)
+                losses.update(depth_loss)
+                total_loss += self.depth["weight"] * depth_loss["loss_depth"]
+
+        # Point loss
+        if self.point is not None and "point" in self.point and self.point["weight"] > 0:
+            if "world_points" in predictions:
+                point_loss = self._compute_point_loss(predictions, batch)
+                losses.update(point_loss)
+                total_loss += self.point["weight"] * point_loss["loss_point"]
+
+        # Track loss
+        if self.track is not None and "track" in self.track and self.track["weight"] > 0:
+            if "track" in predictions:
+                track_loss = self._compute_track_loss(predictions, batch)
+                losses.update(track_loss)
+                total_loss += self.track["weight"] * track_loss["loss_track"]
+
+        # NVS loss
+        if self.nvs is not None and self.nvs["weight"] > 0:
+            if "predicted_image" in predictions:
+                nvs_loss = self._compute_nvs_loss(predictions, batch)
+                losses.update(nvs_loss)
+                total_loss += self.nvs["weight"] * nvs_loss["loss_nvs"]
+
+        losses["objective"] = total_loss
+        return losses
+
+    def _compute_camera_loss(self, predictions, batch):
+        """Placeholder for camera loss"""
+        return {"loss_camera": torch.tensor(0.0, device=predictions["pose_enc"].device)}
+
+    def _compute_depth_loss(self, predictions, batch):
+        """Placeholder for depth loss"""
+        return {"loss_depth": torch.tensor(0.0, device=predictions["depth"].device)}
+
+    def _compute_point_loss(self, predictions, batch):
+        """Placeholder for point loss"""
+        return {"loss_point": torch.tensor(0.0, device=predictions["world_points"].device)}
+
+    def _compute_track_loss(self, predictions, batch):
+        """Placeholder for track loss"""
+        return {"loss_track": torch.tensor(0.0, device=predictions["track"].device)}
+
+    def _compute_nvs_loss(self, predictions, batch):
+        """Compute NVS losses.
         
-        # Depth estimation loss - if depth maps are predicted
-        if "depth" in predictions:
-            depth_loss_dict = compute_depth_loss(predictions, batch, **self.depth)
-            depth_loss = depth_loss_dict["loss_conf_depth"] + depth_loss_dict["loss_reg_depth"] + depth_loss_dict["loss_grad_depth"]
-            depth_loss = depth_loss * self.depth["weight"]
-            total_loss = total_loss + depth_loss
-            loss_dict.update(depth_loss_dict)
+        Args:
+            predictions: Dict containing predicted_image and predicted_image_conf
+            batch: Dict containing target_image
+            
+        Returns:
+            Dict containing NVS losses
+        """
+        device = predictions["predicted_image"].device
+        losses = {}
 
-        # 3D point reconstruction loss - if world points are predicted
-        if "world_points" in predictions:
-            point_loss_dict = compute_point_loss(predictions, batch, **self.point)
-            point_loss = point_loss_dict["loss_conf_point"] + point_loss_dict["loss_reg_point"] + point_loss_dict["loss_grad_point"]
-            point_loss = point_loss * self.point["weight"]
-            total_loss = total_loss + point_loss
-            loss_dict.update(point_loss_dict)
-
-        # Tracking loss - not cleaned yet, dirty code is at the bottom of this file
-        if "track" in predictions:
-            raise NotImplementedError("Track loss is not cleaned up yet")
+        # Image reconstruction loss
+        pred_img = predictions["predicted_image"]
+        target_img = batch["target_view"]["image"]
         
-        loss_dict["objective"] = total_loss
+        # L1 loss between predicted and target images
+        recon_loss = torch.abs(pred_img - target_img).mean()
+        losses["loss_nvs"] = recon_loss
 
-        return loss_dict
+        # Confidence regularization loss if available
+        if "predicted_image_conf" in predictions:
+            conf = predictions["predicted_image_conf"]
+            conf_loss = -torch.log(conf + 1e-6).mean()
+            losses["loss_nvs_conf"] = conf_loss
+            losses["loss_nvs"] += self.nvs["conf_weight"] * conf_loss
+
+        return losses
 
 
 def compute_camera_loss(

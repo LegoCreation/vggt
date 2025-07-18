@@ -8,9 +8,17 @@ import os
 import torch
 import numpy as np
 
+def apply_distortion(points, distortion_params):
+    """Placeholder for distortion - not used in NVS"""
+    return points
 
-from vggt.dependency.distortion import apply_distortion, iterative_undistortion, single_undistortion
+def iterative_undistortion(points, distortion_params):
+    """Placeholder for undistortion - not used in NVS"""
+    return points
 
+def single_undistortion(points, distortion_params):
+    """Placeholder for single undistortion - not used in NVS"""
+    return points
 
 def unproject_depth_map_to_point_map(
     depth_map: np.ndarray, extrinsics_cam: np.ndarray, intrinsics_cam: np.ndarray

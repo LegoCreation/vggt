@@ -831,21 +831,35 @@ class Trainer:
         if self.data_conf.train.common_config.repeat_batch:
             batch = self._apply_batch_repetition(batch)
         
-        # Normalize camera extrinsics and points. The function returns new tensors.
-        normalized_extrinsics, normalized_cam_points, normalized_world_points, normalized_depths = \
-            normalize_camera_extrinsics_and_points_batch(
-                extrinsics=batch["extrinsics"],
-                cam_points=batch["cam_points"],
-                world_points=batch["world_points"],
-                depths=batch["depths"],
-                point_masks=batch["point_masks"],
-            )
+        # Move images to device first
+        batch["images"] = batch["images"].to(self.device, non_blocking=True)
+        
+        # Handle target view data for NVS if present
+        if all(k in batch for k in ['target_image', 'target_ray_o', 'target_ray_d']):
+            target_view = {
+                'image': batch['target_image'].to(self.device, non_blocking=True),
+                'ray_o': batch['target_ray_o'].to(self.device, non_blocking=True),
+                'ray_d': batch['target_ray_d'].to(self.device, non_blocking=True)
+            }
+            batch['target_view'] = target_view
+        
+        # Process original VGGT data if present
+        if all(k in batch for k in ["extrinsics", "cam_points", "world_points", "depths", "point_masks"]):
+            # Normalize camera extrinsics and points. The function returns new tensors.
+            normalized_extrinsics, normalized_cam_points, normalized_world_points, normalized_depths = \
+                normalize_camera_extrinsics_and_points_batch(
+                    extrinsics=batch["extrinsics"],
+                    cam_points=batch["cam_points"],
+                    world_points=batch["world_points"],
+                    depths=batch["depths"],
+                    point_masks=batch["point_masks"],
+                )
 
-        # Replace the original values in the batch with the normalized ones.
-        batch["extrinsics"] = normalized_extrinsics
-        batch["cam_points"] = normalized_cam_points
-        batch["world_points"] = normalized_world_points
-        batch["depths"] = normalized_depths
+            # Replace the original values in the batch with the normalized ones.
+            batch["extrinsics"] = normalized_extrinsics
+            batch["cam_points"] = normalized_cam_points
+            batch["world_points"] = normalized_world_points
+            batch["depths"] = normalized_depths
 
         return batch
     
@@ -859,7 +873,14 @@ class Trainer:
         loss_meters: dict[str, AverageMeter],
     ):
         # Forward run of the model
-        y_hat = model(images = batch["images"])
+        model_kwargs = {
+            'images': batch['images'],
+            'target_view': batch.get('target_view', None),
+            'query_points': batch.get('query_points', None),
+            'use_amp': self.scaler is not None
+        }
+        y_hat = model(**model_kwargs)
+        
         # Compute the loss
         loss_dict = self.loss(y_hat, batch)
         
@@ -867,7 +888,6 @@ class Trainer:
         y_hat_batch = {**y_hat, **loss_dict, **batch}
 
         self._update_and_log_scalars(y_hat_batch, phase, self.steps[phase], loss_meters)
-
         self._log_tb_visuals(y_hat_batch, phase, self.steps[phase])
 
         self.steps[phase] += 1
