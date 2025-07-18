@@ -8,7 +8,6 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 from typing import Optional, Tuple, Union, List, Dict, Any
 
 from vggt.layers import PatchEmbed
@@ -27,7 +26,6 @@ class Aggregator(nn.Module):
     The Aggregator applies alternating-attention over input frames,
     as described in VGGT: Visual Geometry Grounded Transformer.
 
-    Remember to set model.train() to enable gradient checkpointing to reduce memory usage.
 
     Args:
         img_size (int): Image size in pixels.
@@ -135,10 +133,15 @@ class Aggregator(nn.Module):
         nn.init.normal_(self.register_token, std=1e-6)
 
         # Register normalization constants as buffers
-        for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
-            self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
-
-        self.use_reentrant = False # hardcoded to False
+        for name, value in (
+            ("_resnet_mean", _RESNET_MEAN),
+            ("_resnet_std", _RESNET_STD),
+        ):
+            self.register_buffer(
+                name,
+                torch.FloatTensor(value).view(1, 1, 3, 1, 1),
+                persistent=False,
+            )
 
     def __build_patch_embed__(
         self,
@@ -156,6 +159,8 @@ class Aggregator(nn.Module):
         Build the patch embed layer. If 'conv', we use a
         simple PatchEmbed conv layer. Otherwise, we use a vision transformer.
         """
+        
+        self.target_view_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=6, embed_dim=embed_dim)#, norm_layer=nn.LayerNorm)
 
         if "conv" in patch_embed:
             self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=3, embed_dim=embed_dim)
@@ -181,19 +186,25 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor) -> Tuple[List[torch.Tensor], int]:
+    def forward(
+        self,
+        images: torch.Tensor,
+        target_view: torch.Tensor
+    ) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
+            target_view (torch.Tensor): Target view Plücker image [B, S, 6, H, W].
 
         Returns:
             (list[torch.Tensor], int):
                 The list of outputs from the attention blocks,
                 and the patch_start_idx indicating where patch tokens begin.
         """
-        B, S, C_in, H, W = images.shape
-
+        B, S_c, C_in, H, W = images.shape
+        B_t, S_t, C_t, H_t, W_t = target_view.shape
+        
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
 
@@ -201,12 +212,17 @@ class Aggregator(nn.Module):
         images = (images - self._resnet_mean) / self._resnet_std
 
         # Reshape to [B*S, C, H, W] for patch embedding
-        images = images.view(B * S, C_in, H, W)
+        images = images.view(B * S_c, C_in, H, W)
+        target_view = target_view.view(B_t * S_t, C_t, H_t, W_t)
+        S=S_c + S_t
         patch_tokens = self.patch_embed(images)
-
+        target_view_tokens = self.target_view_embed(target_view)
         if isinstance(patch_tokens, dict):
             patch_tokens = patch_tokens["x_norm_patchtokens"]
+        if isinstance(target_view_tokens, dict):
+            target_view_tokens = target_view_tokens["x_norm_patchtokens"]
 
+        patch_tokens = torch.cat([patch_tokens, target_view_tokens], dim=0)
         _, P, C = patch_tokens.shape
 
         # Expand camera and register tokens to match batch size and sequence length
@@ -233,6 +249,7 @@ class Aggregator(nn.Module):
         frame_idx = 0
         global_idx = 0
         output_list = []
+        target_view_list = []
 
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
@@ -250,12 +267,13 @@ class Aggregator(nn.Module):
             for i in range(len(frame_intermediates)):
                 # concat frame and global intermediates, [B x S x P x 2C]
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
-                output_list.append(concat_inter)
-
+                output_list.append(concat_inter) 
+                # output_list.append(concat_inter[:, :S_t])
+                target_view_list.append(concat_inter[:, S_c:])
         del concat_inter
         del frame_intermediates
         del global_intermediates
-        return output_list, self.patch_start_idx
+        return output_list, self.patch_start_idx, target_view_list
 
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
         """
@@ -272,10 +290,7 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.training:
-                tokens = checkpoint(self.frame_blocks[frame_idx], tokens, pos, use_reentrant=self.use_reentrant)
-            else:
-                tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
+            tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
@@ -295,15 +310,14 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.training:
-                tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
-            else:
-                tokens = self.global_blocks[global_idx](tokens, pos=pos)
+            tokens = self.global_blocks[global_idx](tokens, pos=pos)
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
         return tokens, global_idx, intermediates
 
+    def unfreeze_target_view_embedding(self):
+        self.target_view_embed.requires_grad_(True)
 
 def slice_expand_and_flatten(token_tensor, B, S):
     """
