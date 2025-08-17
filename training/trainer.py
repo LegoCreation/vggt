@@ -21,6 +21,7 @@ import torchvision
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
 
+from vggt.models.vggt import VGGT
 from train_utils.checkpoint import DDPCheckpointSaver
 from train_utils.distributed import get_machine_local_and_dist_rank
 from train_utils.freeze import freeze_modules
@@ -37,8 +38,21 @@ os.environ["MKL_THREADING_LAYER"] = "GNU"
 # Provides full Hydra stack traces on error for easier debugging.
 os.environ["HYDRA_FULL_ERROR"] = "1"
 # Enables asynchronous error handling for NCCL, which can prevent hangs.
-os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 
+
+
+def save_image_at_epoch(context: torch.Tensor, target_gt: torch.Tensor, target_pred: torch.Tensor, epoch: int, out_path):
+    to_pil = torchvision.transforms.ToPILImage()
+    if not os.path.exists(out_path):
+        os.makedirs(out_path, exist_ok=True)
+    print(target_gt.shape, target_gt.min(), target_gt.max())
+    print(target_pred.shape, target_pred.min(), target_pred.max())
+    for b in range(target_gt.shape[0]):
+        img = to_pil(torch.cat((target_gt[b, 0, ...], target_pred[b, 0, ...]), dim=-1))
+        img.save(f'{out_path}/{epoch}_{b}_target_vs_prediction.png')
+    # input_views = to_pil(torch.cat([context[0, i, :, :, :] for i in range(context.shape[1])], dim=-1))
+    # input_views.save(f'{out_path}/{epoch}_input_views_epoch.png')
 
 class Trainer:
     """
@@ -241,7 +255,11 @@ class Trainer:
 
         # Instantiate components from configs
         self.tb_writer = instantiate(self.logging_conf.tensorboard_writer, _recursive_=False)
-        self.model = instantiate(self.model_conf, _recursive_=False)
+        if self.model_conf.base_checkpoint:
+            self.model = VGGT.from_pretrained(self.model_conf.base_checkpoint)
+            self.model.deactivate_heads(self.model_conf)
+        else:
+            self.model = instantiate(self.model_conf, _recursive_=False)
         self.loss = instantiate(self.loss_conf, _recursive_=False)
         self.gradient_clipper = instantiate(self.optim_conf.gradient_clip)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.optim_conf.amp.enabled)
@@ -543,7 +561,7 @@ class Trainer:
         for data_iter, batch in enumerate(train_loader):
             if data_iter > limit_train_batches:
                 break
-            
+
             # measure data loading time
             data_time.update(time.time() - end)
             data_times.append(data_time.val)
@@ -562,7 +580,7 @@ class Trainer:
                 chunked_batches = chunk_batch_for_accum_steps(batch, accum_steps)
 
             self._run_steps_on_batch_chunks(
-                chunked_batches, phase, loss_meters
+                chunked_batches, phase, loss_meters, data_iter
             )
 
             # compute gradient and do SGD step
@@ -637,6 +655,7 @@ class Trainer:
         chunked_batches: List[Any],
         phase: str,
         loss_meters: Dict[str, AverageMeter],
+        epoch = 0
     ):
         """
         Run the forward / backward as many times as there are chunks in the batch,
@@ -668,7 +687,7 @@ class Trainer:
                     dtype=amp_type,
                 ):
                     loss_dict = self._step(
-                        chunked_batch, self.model, phase, loss_meters
+                        chunked_batch, self.model, phase, loss_meters, epoch % 10 == 0, epoch
                     )
 
 
@@ -693,7 +712,7 @@ class Trainer:
         """
         tensor_keys = [
             "images", "depths", "extrinsics", "intrinsics", 
-            "cam_points", "world_points", "point_masks", 
+            "cam_points", "world_points", "point_masks", 'target_views', 'target_images'
         ]        
         string_keys = ["seq_name"]
         
@@ -732,7 +751,7 @@ class Trainer:
 
         return batch
 
-    def _step(self, batch, model: nn.Module, phase: str, loss_meters: dict):
+    def _step(self, batch, model: nn.Module, phase: str, loss_meters: dict, export_target_image=False, step=0):
         """
         Performs a single forward pass, computes loss, and logs results.
         
@@ -740,8 +759,22 @@ class Trainer:
             A dictionary containing the computed losses.
         """
         # Forward pass
-        y_hat = model(images=batch["images"])
+        target_ids = batch['target_views']
+        if target_ids.shape[-1] == 1:
+            target_ids = target_ids.squeeze(-1)
+        else:
+            target_ids = target_ids.squeeze()
+
         
+        # TODO: target ids instead of [-1] index here
+        target_intr = batch['intrinsics'][:, [-1], ...]
+        target_extr = batch['extrinsics'][:, [-1], ...]
+
+        y_hat = model(images=batch["images"], target_intrinsics=target_intr, target_extrinsics=target_extr)
+        
+        if export_target_image:
+            save_image_at_epoch(None, batch['target_images'], y_hat['predicted_image'], step, os.path.join(self.logging_conf.log_dir, 'debug_images'))
+
         # Loss computation
         loss_dict = self.loss(y_hat, batch)
         
