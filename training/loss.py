@@ -731,7 +731,7 @@ class PerceptualLoss(nn.Module):
     
     def _load_weights(self):
         """Load pre-trained VGG weights. """
-        weight_file = Path("/usr/prakt/s0016/vggt-nvs/metric_checkpoint/imagenet-vgg-verydeep-19.mat")
+        weight_file = Path("/usr/prakt/s0016/vggt-nvs/metric_checkpoint/imagenet-vgg-verydeep-19.mat") # TODO: Remove hardcoded path
         weight_file.parent.mkdir(exist_ok=True, parents=True)
         
         # Download weights if needed

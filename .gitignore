@@ -8,6 +8,7 @@ __pycache__/
 *$py.class
 
 /logs
+training/logs*
 
 # C extensions
 *.so

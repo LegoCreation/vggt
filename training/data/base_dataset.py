@@ -197,8 +197,8 @@ class BaseDataset(Dataset):
                 safe_bound=safe_bound,
                 rescale_aug=self.rescale_aug
             )
-        else:
-            print("Not rescaling the images")
+        # else:
+        #     print("Not rescaling the images")
 
         # Ensure final crop to target shape
         image, depth_map, intri_opencv, track = crop_image_depth_and_intrinsic_by_pp(

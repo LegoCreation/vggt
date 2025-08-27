@@ -46,8 +46,7 @@ def save_image_at_epoch(context: torch.Tensor, target_gt: torch.Tensor, target_p
     to_pil = torchvision.transforms.ToPILImage()
     if not os.path.exists(out_path):
         os.makedirs(out_path, exist_ok=True)
-    print(target_gt.shape, target_gt.min(), target_gt.max())
-    print(target_pred.shape, target_pred.min(), target_pred.max())
+
     for b in range(target_gt.shape[0]):
         img = to_pil(torch.cat((target_gt[b, 0, ...], target_pred[b, 0, ...]), dim=-1))
         img.save(f'{out_path}/{epoch}_{b}_target_vs_prediction.png')
@@ -224,7 +223,7 @@ class Trainer:
         # Load optimizer state if available and in training mode
         if "optimizer" in checkpoint:
             logging.info(f"Loading optimizer state dict (rank {self.rank})")
-            self.optims.optimizer.load_state_dict(checkpoint["optimizer"])
+            self.optims[0].optimizer.load_state_dict(checkpoint["optimizer"])
 
         # Load training progress
         if "epoch" in checkpoint:
@@ -687,7 +686,7 @@ class Trainer:
                     dtype=amp_type,
                 ):
                     loss_dict = self._step(
-                        chunked_batch, self.model, phase, loss_meters, epoch % 10 == 0, epoch
+                        chunked_batch, self.model, phase, loss_meters, epoch % 100 == 0, epoch
                     )
 
 
@@ -712,10 +711,10 @@ class Trainer:
         """
         tensor_keys = [
             "images", "depths", "extrinsics", "intrinsics", 
-            "cam_points", "world_points", "point_masks", 'target_views', 'target_images'
+            "cam_points", "world_points", "point_masks", 'target_intrinsics', 'target_extrinsics', 'target_images'
         ]        
         string_keys = ["seq_name"]
-        
+
         for key in tensor_keys:
             if key in batch:
                 original_tensor = batch[key]
@@ -759,14 +758,7 @@ class Trainer:
             A dictionary containing the computed losses.
         """
         # Forward pass
-        target_ids = batch['target_views']
-        if target_ids.shape[-1] == 1:
-            target_ids = target_ids.squeeze(-1)
-        else:
-            target_ids = target_ids.squeeze()
 
-        
-        # TODO: target ids instead of [-1] index here
         target_intr = batch['intrinsics'][:, [-1], ...]
         target_extr = batch['extrinsics'][:, [-1], ...]
 

@@ -120,7 +120,6 @@ class ComposedDataset(Dataset, ABC):
         world_points = torch.from_numpy(np.stack(batch["world_points"]).astype(np.float32))
         point_masks = torch.from_numpy(np.stack(batch["point_masks"])) # Mask indicating valid depths / world points / cam points per frame
         ids = torch.from_numpy(batch["ids"])    # Frame indices sampled from the original sequence
-        target_rays = torch.from_numpy(np.stack(batch["target_views"]).astype(np.int32))
 
         # Invalidate all points if first frame has no valid points
         if point_masks.numel() > 0 and point_masks[0].sum() == 0:
@@ -148,7 +147,6 @@ class ComposedDataset(Dataset, ABC):
             "cam_points": cam_points,
             "world_points": world_points,
             "point_masks": point_masks,
-            "target_views": target_rays,
             "target_images": target_images,
         }
 

@@ -47,6 +47,7 @@ class UCO3dDataset(BaseDataset):
         super().__init__(common_conf=common_conf)
 
         self.debug = common_conf.debug
+        self.single_sequence = common_conf.single_sequence
         self.training = common_conf.training
         self.get_nearby = common_conf.get_nearby
         self.load_depth = common_conf.load_depth
@@ -56,9 +57,6 @@ class UCO3dDataset(BaseDataset):
         if DATASET_DIR is None or SPLIT_FILE is None:
             raise ValueError("Both DATASET_DIR and SPLIT_FILE must be specified.")
 
-        if self.debug:
-            category = ["bicycle"]
-        
         self.split = split
         if split == "train":
             self.len_train = len_train
@@ -85,41 +83,18 @@ class UCO3dDataset(BaseDataset):
         with open(self.SPLIT_FILE , 'r') as f:
             split_dict = json.load(f)
 
-        # Previously used for parsing given split files
-        # for category, seq_id_list in tqdm.tqdm(split_dict.items()):
-        #     # We don't have the full dataset, check if the category exists at all
-        #     category_path = osp.join(self.DATASET_DIR, category)
-        #     if not osp.exists(category_path):
-        #         continue
-        #     all_sequences = os.listdir(category_path)
-        #     for sequence_id in seq_id_list:
-        #         if sequence_id in all_sequences:
-        #             sequence = osp.join(category_path, sequence_id)
-        #             cam_data = osp.join(sequence, 'camera_data.npz')
-        #             # We don't have the full dataset, check if the sequence exists
-        #             if not osp.exists(sequence) or not osp.exists(cam_data):
-        #                 continue
-        #             camera_poses = np.load(cam_data)
-        #             annotations = []
-        #             for idx in range(len(camera_poses['intrinsics'])):
-        #                 annotation = {'filepath': osp.join(category, sequence_id, 'images', f'frame{idx:06d}.jpg'), 'frame_id': idx}
-        #                 annotation['extri'] = camera_poses['camera_poses'][idx]
-        #                 annotation['intri'] = camera_poses['intrinsics'][idx]
-        #                 annotations.append(annotation)
-        #             self.data_store[sequence_id] = annotations
-        #             total_frame_num += len(annotations)
-
         ct = 0
         for sequence_id, seq_data in tqdm.tqdm(split_dict.items()):
-            if ct > 100 and self.debug:
+            if ct > 0 and self.debug:
                 break
             ct+=1
             camera_data_path = osp.join(self.DATASET_DIR, seq_data['camera_data'])
             camera_poses = np.load(camera_data_path)
+            extrinsics = np.linalg.inv(camera_poses['camera_poses'])
             annotations = []
             for image_path, idx in seq_data['image_paths']:
                 annotation = {'filepath': image_path, 'frame_id': idx}
-                annotation['extri'] = camera_poses['camera_poses'][idx][:3, ...]
+                annotation['extri'] = extrinsics[idx][:3, ...]
                 annotation['intri'] = camera_poses['intrinsics'][idx]
                 annotations.append(annotation)
             self.data_store[sequence_id] = annotations
@@ -203,16 +178,14 @@ class UCO3dDataset(BaseDataset):
         metadata = self.data_store[seq_name]
 
         if ids is None:
-            ids = np.random.choice(
-                len(metadata), img_per_seq, replace=self.allow_duplicate_img
-            )
-
+            if self.single_sequence:
+                ids = np.arange(0, img_per_seq)
+            else:
+                ids = np.random.choice(
+                    len(metadata), img_per_seq, replace=self.allow_duplicate_img
+                )
         annos = [metadata[i] for i in ids]
 
-        # Set last n images as target
-        target_rays = list(range(len(annos)-num_target_images, len(annos)))
-        for target_id in target_rays:
-            annos[target_id]['target'] = True
 
         target_image_shape = self.get_target_shape(aspect_ratio)
         images = []
@@ -225,7 +198,7 @@ class UCO3dDataset(BaseDataset):
         image_paths = []
         original_sizes = []
         target_images = []
-        for anno in annos:
+        for idx, anno in enumerate(annos):
             filepath = anno["filepath"]
 
             image_path = osp.join(self.DATASET_DIR, filepath)
@@ -262,9 +235,8 @@ class UCO3dDataset(BaseDataset):
                 target_image_shape,
                 filepath=filepath,
             )
-            if 'target' in anno and anno['target']:
+            if idx >= (len(annos) - num_target_images):
                 target_images.append(image)
-                anno['target'] = False
             else: 
                 images.append(image)
             
@@ -289,7 +261,6 @@ class UCO3dDataset(BaseDataset):
             "world_points": world_points,
             "point_masks": point_masks,
             "original_sizes": original_sizes,
-            "target_views": target_rays,
             "target_images": target_images
         }
         return batch

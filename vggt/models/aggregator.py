@@ -217,8 +217,10 @@ class Aggregator(nn.Module):
         S=S_c + S_t
         patch_tokens = self.patch_embed(images)
         target_view_tokens = self.target_view_embed(target_view)
+ 
         if isinstance(patch_tokens, dict):
             patch_tokens = patch_tokens["x_norm_patchtokens"]
+
         if isinstance(target_view_tokens, dict):
             target_view_tokens = target_view_tokens["x_norm_patchtokens"]
 

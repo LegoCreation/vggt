@@ -4,9 +4,12 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Dict
+
 import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
+from einops import rearrange
 
 from vggt.models.aggregator import Aggregator
 from vggt.heads.camera_head import CameraHead
@@ -20,10 +23,10 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         img_size=518,
         patch_size=14,
         embed_dim=1024,
-        enable_camera=False,
-        enable_depth=False,
-        enable_point=False,
-        enable_track=False,
+        enable_camera=True,
+        enable_depth=True,
+        enable_point=True,
+        enable_track=True,
     ):
         super().__init__()
 
@@ -38,6 +41,52 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         # NVS head is always enabled for our task
         self.nvs_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="sigmoid", conf_activation="expp1")
 
+    @torch.no_grad()
+    def _compute_rays(self, extr: torch.Tensor, intrinsics: torch.Tensor, target_image_shape: torch.Size, device="cuda"):
+        """
+        Args:
+            extr (torch.Tensor): [b, s, 3, 4] OpenCV Extrinsics matrix
+            intrinsics (torch.Tensor): [b, s, 3, 3] OpenCV Intrinsics matrix
+            target_image_shape (torch.Size): [b, s, c, h, w]
+        Returns:
+            [ray_o, ray_d] (torch.tensor): [b, s, 6, h, w]
+        """
+        B, S, _, _ = extr.shape
+        _, _, _, H, W = target_image_shape
+        R_w2c = extr[..., :3, :3]
+        t_wc = extr[..., :3, 3:]
+        R_c2w = R_w2c.transpose(-1, -2)
+        cam_center = -torch.matmul(R_c2w, t_wc).squeeze(-1)
+
+        y, x = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
+        x = x + 0.5
+        y = y + 0.5
+
+        x = x.unsqueeze(0).unsqueeze(0).expand(B, S, H, W)
+        y = y.unsqueeze(0).unsqueeze(0).expand(B, S, H, W)
+        
+        fx = intrinsics[..., 0:1, 0:1]
+        fy = intrinsics[..., 1:2, 1:2]
+        cx = intrinsics[..., 0:1, 2:3]
+        cy = intrinsics[..., 1:2, 2:3]
+
+        x = (x - cx) / fx
+        y = (y - cy) / fy
+        z = torch.ones_like(x)
+
+        ray_d = torch.stack([x, y, z], dim=-1)
+        ray_d = ray_d.view(B, S, H * W, 3) @ R_w2c
+        ray_d = ray_d.view(B, S, H, W, 3)
+        ray_d = ray_d / torch.norm(ray_d, dim=-1, keepdim=True)
+
+        ray_o = cam_center[..., None, None, :].expand(B, S, H, W, 3)
+
+        ray_o = rearrange(ray_o, "b s h w c -> b s c h w")
+        ray_d = rearrange(ray_d.view(B, S, H, W, 3), "b s h w c -> b s c h w")
+
+        return ray_o, ray_d
+
+    # @torch.no_grad()
     def _plucker_ray_embeddings(self, ray_o: torch.Tensor, ray_d: torch.Tensor):
         '''
         Args:
@@ -53,10 +102,9 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
     def forward(
         self,
         images: torch.Tensor,
-        target_view: torch.Tensor,
+        target_intrinsics: torch.Tensor,
+        target_extrinsics: torch.Tensor,
         query_points: torch.Tensor = None,
-        amp_dtype=torch.float32,
-        use_amp=False
     ):
         """
         Forward pass of the VGGT model.
@@ -66,6 +114,8 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
             target_view (torch.Tensor): Target view pose [B, S].
                 B: batch size, S: sequence length
+            intrinsics: (torch.Tensor), OpenCV Camera intrinsics [B, S, 3, 3]
+            extrinsics: (torch.Tensor), OpenCV Camera Extrinsics [B, S, 3, 4]
             query_points (torch.Tensor, optional): Query points for tracking, in pixel coordinates.
                 Shape: [N, 2] or [B, N, 2], where N is the number of query points.
                 Default: None
@@ -90,23 +140,25 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
             images = images.unsqueeze(0)
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
-
-        target_plucker = self._plucker_ray_embeddings(target_view['ray_o'], target_view['ray_d'])
+        
+        ray_o, ray_d = self._compute_rays(target_extrinsics, target_intrinsics, images.shape)
+        target_plucker = self._plucker_ray_embeddings(ray_o, ray_d)
         aggregated_tokens_list, patch_start_idx, target_tokens = self.aggregator(images, target_plucker)
-        images = torch.cat([images, target_view['image']], dim=1)
         predictions = {}
 
         with torch.amp.autocast('cuda', enabled=False):
-            if self.camera_head is not None:
-                pose_enc_list = self.camera_head(aggregated_tokens_list)
-                predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
-
             if self.nvs_head is not None:
                 predicted_image, predicted_image_conf = self.nvs_head(
                     target_tokens, images=target_plucker, patch_start_idx=patch_start_idx
                 )
                 predictions['predicted_image'] = predicted_image.permute(0, 1, 4, 2, 3)
                 predictions['predicted_image_conf'] = predicted_image_conf
+                images = torch.cat([images, predictions['predicted_image']], dim=1)
+            
+            if self.camera_head is not None:
+                pose_enc_list = self.camera_head(aggregated_tokens_list)
+                predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
+                predictions["pose_enc_list"] = pose_enc_list
 
             if self.depth_head is not None:
                 depth, depth_conf = self.depth_head(
@@ -133,19 +185,15 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
             predictions["images"] = images
         return predictions
 
-    def freeze_backbone(self, freeze_aggregator=True, freeze_heads=False, unfrozen_AA_layer_num=-1):
+    def deactivate_heads(self, model_conf):
         """
-        Freeze the backbone of the model.
+        Removes heads that we are disabled in the model config.
         """
-        if freeze_aggregator:
-            self.aggregator.requires_grad_(False)
-            self.aggregator.unfreeze_target_view_embedding()
-        for i in range(0, max(0, unfrozen_AA_layer_num)):
-            self.aggregator.frame_blocks[-i-1].requires_grad_(True)
-            self.aggregator.global_blocks[-i-1].requires_grad_(True)
-        if not freeze_heads:
-            del self.point_head, self.depth_head, self.track_head
-            self.camera_head.requires_grad_(freeze_heads)
-            self.point_head = None
+        if not model_conf.enable_camera:
+            self.camera_head = None
+        if not model_conf.enable_depth:
             self.depth_head = None
+        if not model_conf.enable_point:
+            self.point_head = None
+        if not model_conf.enable_track:
             self.track_head = None
