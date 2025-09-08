@@ -150,3 +150,6 @@ skyseg.onnx
 # pixi environments
 .pixi
 *.egg-info
+
+*.json
+/metric_checkpoint/

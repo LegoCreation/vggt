@@ -24,7 +24,7 @@ nvidia-smi
 source /usr/prakt/s0017/anaconda3/bin/activate
 conda activate vggt_nvs
 
-CONFIG_FILE="nvs"
+CONFIG_FILE="uco3d_nvs_training.yaml"
 
 # Find a free port dynamically
 FREE_PORT=$(python find_free_port.py)
