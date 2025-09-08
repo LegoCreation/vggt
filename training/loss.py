@@ -99,14 +99,15 @@ class MultitaskLoss(torch.nn.Module):
             l2_loss = torch.tensor(1e-8).to(rendering.device)
             if self.nvs['l2_weight'] > 0.0:
                 l2_loss = F.mse_loss(rendering, target)
-                total_loss += l2_loss * self.nvs['l2_weight']
+                total_loss = total_loss + l2_loss * self.nvs['l2_weight']
                 loss_dict.update({"NVS L2 loss": l2_loss})
             psnr = -10.0 * torch.log10(l2_loss)
             loss_dict.update({"train psnr": psnr})
             # with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             if self.nvs['perceptual_weight'] > 0.0:
+                # TODO: this still produces different results when batched (up to 1E-04, but not 0.)
                 perceptual_loss = self.perceptual_loss_module(rendering, target)
-                total_loss += perceptual_loss * self.nvs['perceptual_weight']
+                total_loss = total_loss + perceptual_loss * self.nvs['perceptual_weight']
                 loss_dict.update({"NVS perceptual loss": perceptual_loss})
 
         loss_dict["objective"] = total_loss

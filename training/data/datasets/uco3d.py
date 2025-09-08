@@ -237,7 +237,7 @@ class UCO3dDataset(BaseDataset):
             )
             if idx >= (len(annos) - num_target_images):
                 target_images.append(image)
-            else: 
+            else:
                 images.append(image)
             
             depths.append(depth_map)

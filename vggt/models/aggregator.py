@@ -160,7 +160,7 @@ class Aggregator(nn.Module):
         simple PatchEmbed conv layer. Otherwise, we use a vision transformer.
         """
         
-        self.target_view_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=6, embed_dim=embed_dim)#, norm_layer=nn.LayerNorm)
+        self.target_view_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=6, embed_dim=embed_dim)
 
         if "conv" in patch_embed:
             self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=3, embed_dim=embed_dim)
@@ -204,28 +204,36 @@ class Aggregator(nn.Module):
         """
         B, S_c, C_in, H, W = images.shape
         B_t, S_t, C_t, H_t, W_t = target_view.shape
+        S=S_c + S_t
         
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
 
         # Normalize images and reshape for patch embed
+        # Here, not tokenizing with dinov2 sequentially results
+        # In different predictions
+        # Since the predictor is so sensitive, we opt for the sequential approach for now.
+        # TODO: fix dino encoder or reconsider.
         images = (images - self._resnet_mean) / self._resnet_std
+        patch_token_batch = []
+        for image in images.view(B, S_c, C_in, H, W):
+            patch_tokens_single_image = self.patch_embed(image)['x_norm_patchtokens']
+            patch_token_batch.append(patch_tokens_single_image)
+        patch_tokens = torch.cat(patch_token_batch, dim=0)
 
         # Reshape to [B*S, C, H, W] for patch embedding
-        images = images.view(B * S_c, C_in, H, W)
         target_view = target_view.view(B_t * S_t, C_t, H_t, W_t)
-        S=S_c + S_t
-        patch_tokens = self.patch_embed(images)
         target_view_tokens = self.target_view_embed(target_view)
- 
-        if isinstance(patch_tokens, dict):
-            patch_tokens = patch_tokens["x_norm_patchtokens"]
+        # images = images.view(B * S_c, C_in, H, W)
+        # patch_tokens = self.patch_embed(images)
+        # if isinstance(patch_tokens, dict):
+        #     patch_tokens = patch_tokens["x_norm_patchtokens"]
 
         if isinstance(target_view_tokens, dict):
             target_view_tokens = target_view_tokens["x_norm_patchtokens"]
 
-        patch_tokens = torch.cat([patch_tokens, target_view_tokens], dim=0)
         _, P, C = patch_tokens.shape
+        patch_tokens = torch.cat([patch_tokens.view(B, S_c, P, C), target_view_tokens.view(B, S_t, P, C)], dim=1).view(B*S, P, C)
 
         # Expand camera and register tokens to match batch size and sequence length
         camera_token = slice_expand_and_flatten(self.camera_token, B, S)
@@ -270,7 +278,6 @@ class Aggregator(nn.Module):
                 # concat frame and global intermediates, [B x S x P x 2C]
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                 output_list.append(concat_inter) 
-                # output_list.append(concat_inter[:, :S_t])
                 target_view_list.append(concat_inter[:, S_c:])
         del concat_inter
         del frame_intermediates

@@ -20,6 +20,7 @@ import torch.nn as nn
 import torchvision
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
+import matplotlib.pyplot as plt
 
 from vggt.models.vggt import VGGT
 from train_utils.checkpoint import DDPCheckpointSaver
@@ -29,6 +30,7 @@ from train_utils.general import *
 from train_utils.logging import setup_logging
 from train_utils.normalization import normalize_camera_extrinsics_and_points_batch
 from train_utils.optimizer import construct_optimizers
+
 
 # --- Environment Variable Setup for Performance and Debugging ---
 # Helps with memory fragmentation in PyTorch's memory allocator.
@@ -41,6 +43,31 @@ os.environ["HYDRA_FULL_ERROR"] = "1"
 os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 
 
+def plot_grad_flow(named_parameters, step):
+    ave_grads = []
+    max_grads= []
+    layers = []
+    for n, p in named_parameters:
+        if(p.requires_grad) and ("bias" not in n):
+            layers.append(n)
+            ave_grads.append(p.grad.abs().mean().cpu())
+            max_grads.append(p.grad.abs().max().cpu())
+    plt.figure(figsize=(len(max_grads) / 2, 30))
+    plt.tight_layout()
+    plt.bar(np.arange(len(max_grads)), max_grads, alpha=0.1, lw=1, color="c")
+    plt.bar(np.arange(len(max_grads)), ave_grads, alpha=0.1, lw=1, color="b")
+    plt.hlines(0, 0, len(ave_grads)+1, lw=2, color="k" )
+    plt.xticks(range(0,len(ave_grads), 1), layers, rotation="vertical")
+    plt.xlim(left=0, right=len(ave_grads))
+    plt.ylim(bottom = -0.001)
+    plt.xlabel("Layers")
+    plt.ylabel("average gradient")
+    plt.title("Gradient flow")
+    plt.grid(True)
+    plt.legend([plt.Line2D([0], [0], color="c", lw=4),
+                plt.Line2D([0], [0], color="b", lw=4),
+                plt.Line2D([0], [0], color="k", lw=4)], ['max-gradient', 'mean-gradient', 'zero-gradient'])
+    plt.savefig(f'./gradients/{step}.png')
 
 def save_image_at_epoch(context: torch.Tensor, target_gt: torch.Tensor, target_pred: torch.Tensor, epoch: int, out_path):
     to_pil = torchvision.transforms.ToPILImage()
@@ -50,8 +77,8 @@ def save_image_at_epoch(context: torch.Tensor, target_gt: torch.Tensor, target_p
     for b in range(target_gt.shape[0]):
         img = to_pil(torch.cat((target_gt[b, 0, ...], target_pred[b, 0, ...]), dim=-1))
         img.save(f'{out_path}/{epoch}_{b}_target_vs_prediction.png')
-    # input_views = to_pil(torch.cat([context[0, i, :, :, :] for i in range(context.shape[1])], dim=-1))
-    # input_views.save(f'{out_path}/{epoch}_input_views_epoch.png')
+        input_views = to_pil(torch.cat([context[b, i, ...] for i in range(context.shape[1])], dim=-1))
+        input_views.save(f'{out_path}/{epoch}_{b}_context.png')
 
 class Trainer:
     """
@@ -686,7 +713,7 @@ class Trainer:
                     dtype=amp_type,
                 ):
                     loss_dict = self._step(
-                        chunked_batch, self.model, phase, loss_meters, epoch % 100 == 0, epoch
+                        chunked_batch, self.model, phase, loss_meters, (self.steps[phase] % (100 * accum_steps)) == 0
                     )
 
 
@@ -750,7 +777,7 @@ class Trainer:
 
         return batch
 
-    def _step(self, batch, model: nn.Module, phase: str, loss_meters: dict, export_target_image=False, step=0):
+    def _step(self, batch, model: nn.Module, phase: str, loss_meters: dict, export_target_image=False):
         """
         Performs a single forward pass, computes loss, and logs results.
         
@@ -763,13 +790,13 @@ class Trainer:
         target_extr = batch['extrinsics'][:, [-1], ...]
 
         y_hat = model(images=batch["images"], target_intrinsics=target_intr, target_extrinsics=target_extr)
-        
+
         if export_target_image:
-            save_image_at_epoch(None, batch['target_images'], y_hat['predicted_image'], step, os.path.join(self.logging_conf.log_dir, 'debug_images'))
+            save_image_at_epoch(batch['images'], batch['target_images'], y_hat['predicted_image'], self.steps[phase], os.path.join(self.logging_conf.log_dir, 'debug_images'))
 
         # Loss computation
         loss_dict = self.loss(y_hat, batch)
-        
+
         # Combine all data for logging
         log_data = {**y_hat, **loss_dict, **batch}
 
