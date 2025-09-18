@@ -253,8 +253,8 @@ class Trainer:
             self.optims[0].optimizer.load_state_dict(checkpoint["optimizer"])
 
         # Load training progress
-        if "epoch" in checkpoint:
-            self.epoch = checkpoint["epoch"]
+        if "prev_epoch" in checkpoint:
+            self.epoch = checkpoint["prev_epoch"] + 1
         self.steps = checkpoint["steps"] if "steps" in checkpoint else {"train": 0, "val": 0}
         self.ckpt_time_elapsed = checkpoint.get("time_elapsed", 0)
 
@@ -655,8 +655,20 @@ class Trainer:
 
                 grad_norm_dict = self.gradient_clipper(model=self.model)
 
+                print("Weight norm:", torch.sqrt(sum(p.data.norm()**2 for p in self.model.parameters() if p.requires_grad)))
                 for key, grad_norm in grad_norm_dict.items():
                     loss_meters[f"Grad/{key}"].update(grad_norm)
+                    if grad_norm > 1.0:
+                        print("Gradient:", key, grad_norm)
+                        print("Inf images", torch.any(torch.isinf(batch['images'])))
+                        print("NaN images", torch.any(torch.isnan(batch['images'])))
+
+                        print("Inf targets", torch.any(torch.isinf(batch['target_images'])))
+                        print("NaN targets", torch.any(torch.isnan(batch['target_images'])))
+
+                        print(batch['images'].min(), batch['images'].max())
+                        print(batch['ids'])
+                        print(batch['seq_name'])
 
             # Optimizer step
             for optim in self.optims:   

@@ -149,30 +149,29 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         with torch.amp.autocast('cuda', enabled=False):
             if self.nvs_head is not None:
                 B, S, C, H, W = images.shape
-                # n = torch.zeros((B, S+1, C, H, W))
-                # predicted_image, predicted_image_conf = self.nvs_head(
-                #     aggregated_tokens_list, images=n, patch_start_idx=patch_start_idx
-                # )
-                # predictions['predicted_image'] = predicted_image[:, [-1]].permute(0, 1, 4, 2, 3)
-                # predictions['predicted_image_conf'] = predicted_image_conf[:, [-1]]
-                # images = torch.cat([images, predictions['predicted_image']], dim=1)
+                n = torch.zeros((B, S+1, C, H, W))
+                predicted_image, predicted_image_conf = self.nvs_head(
+                    aggregated_tokens_list, images=n, patch_start_idx=patch_start_idx
+                )
+                predictions['predicted_image'] = predicted_image[:, [-1]].permute(0, 1, 4, 2, 3)
+                predictions['predicted_image_conf'] = predicted_image_conf[:, [-1]]
+                images = torch.cat([images, predictions['predicted_image']], dim=1)
 
                 # Here, not passing the tokens sequentially results
                 # In different predictions (l2 distnace of 3E-3 on average, so approx. 9e-6 per pixel)
                 # Negligible, but might produce slightly different results.
-                # TODO: fix dpt head or reconsider.
-                image_predictions = []
-                confidence_predictions = []
-                n = torch.zeros((1, S+1, C, H, W))
-                for b in range(B):
-                    predicted_image, predicted_image_conf = self.nvs_head(
-                    [x[b:b+1] for x in aggregated_tokens_list], images=n, patch_start_idx=patch_start_idx
-                )
-                    image_predictions.append(predicted_image[:, [-1]].permute(0, 1, 4, 2, 3))
-                    confidence_predictions.append(predicted_image_conf[:, [-1]])
-                predictions['predicted_image'] = torch.cat(image_predictions, dim=0)
-                predictions['predicted_image_conf'] = torch.cat(confidence_predictions, dim=0)
-                images = torch.cat([images, predictions['predicted_image']], dim=1)
+                # image_predictions = []
+                # confidence_predictions = []
+                # n = torch.zeros((1, S+1, C, H, W))
+                # for b in range(B):
+                #     predicted_image, predicted_image_conf = self.nvs_head(
+                #     [x[b:b+1] for x in aggregated_tokens_list], images=n, patch_start_idx=patch_start_idx
+                # )
+                #     image_predictions.append(predicted_image[:, [-1]].permute(0, 1, 4, 2, 3))
+                #     confidence_predictions.append(predicted_image_conf[:, [-1]])
+                # predictions['predicted_image'] = torch.cat(image_predictions, dim=0)
+                # predictions['predicted_image_conf'] = torch.cat(confidence_predictions, dim=0)
+                # images = torch.cat([images, predictions['predicted_image']], dim=1)
 
             if self.camera_head is not None:
                 pose_enc_list = self.camera_head(aggregated_tokens_list)

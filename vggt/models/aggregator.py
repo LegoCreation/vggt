@@ -210,24 +210,24 @@ class Aggregator(nn.Module):
             raise ValueError(f"Expected 3 input channels, got {C_in}")
 
         # Normalize images and reshape for patch embed
+        images = (images - self._resnet_mean) / self._resnet_std
         # Here, not tokenizing with dinov2 sequentially results
         # In different predictions
         # Since the predictor is so sensitive, we opt for the sequential approach for now.
-        # TODO: fix dino encoder or reconsider.
-        images = (images - self._resnet_mean) / self._resnet_std
-        patch_token_batch = []
-        for image in images.view(B, S_c, C_in, H, W):
-            patch_tokens_single_image = self.patch_embed(image)['x_norm_patchtokens']
-            patch_token_batch.append(patch_tokens_single_image)
-        patch_tokens = torch.cat(patch_token_batch, dim=0)
+        # patch_token_batch = []
+        # for image in images.view(B, S_c, C_in, H, W):
+        #     patch_tokens_single_image = self.patch_embed(image)['x_norm_patchtokens']
+        #     patch_token_batch.append(patch_tokens_single_image)
+        # patch_tokens = torch.cat(patch_token_batch, dim=0)
 
         # Reshape to [B*S, C, H, W] for patch embedding
         target_view = target_view.view(B_t * S_t, C_t, H_t, W_t)
         target_view_tokens = self.target_view_embed(target_view)
-        # images = images.view(B * S_c, C_in, H, W)
-        # patch_tokens = self.patch_embed(images)
-        # if isinstance(patch_tokens, dict):
-        #     patch_tokens = patch_tokens["x_norm_patchtokens"]
+        images = images.view(B * S_c, C_in, H, W)
+        patch_tokens = self.patch_embed(images)
+
+        if isinstance(patch_tokens, dict):
+            patch_tokens = patch_tokens["x_norm_patchtokens"]
 
         if isinstance(target_view_tokens, dict):
             target_view_tokens = target_view_tokens["x_norm_patchtokens"]

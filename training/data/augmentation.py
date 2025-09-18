@@ -45,20 +45,20 @@ def get_image_augmentation(
     else:
         effective_jitter = default_jitter
 
-    transform_list.append(
-        transforms.RandomApply(
-            [
-                transforms.ColorJitter(
-                    brightness=effective_jitter["brightness"],
-                    contrast=effective_jitter["contrast"],
-                    saturation=effective_jitter["saturation"],
-                    hue=effective_jitter["hue"],
-                )
-            ],
-            p=effective_jitter["p"],
-        )
-    )
-
+    # transform_list.append(
+    #     transforms.RandomApply(
+    #         [
+    #             transforms.ColorJitter(
+    #                 brightness=effective_jitter["brightness"],
+    #                 contrast=effective_jitter["contrast"],
+    #                 saturation=effective_jitter["saturation"],
+    #                 hue=effective_jitter["hue"],
+    #             )
+    #         ],
+    #         p=effective_jitter["p"],
+    #     )
+    # )
+    # TODO: restore after debugging and in full training?
     if gray_scale:
         transform_list.append(transforms.RandomGrayscale(p=0.05))
 

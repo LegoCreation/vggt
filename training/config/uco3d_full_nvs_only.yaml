@@ -1,0 +1,232 @@
+defaults:
+  - default_dataset.yaml
+
+exp_name: vggt_nvs_only
+img_size: 224
+num_workers: 4
+seed_value: 42
+accum_steps: 16
+patch_size: 14
+val_epoch_freq: 5
+max_img_per_gpu: 640
+max_img_val: 40
+
+limit_train_batches: 800
+limit_val_batches: 50
+
+
+data:
+  train:
+    _target_: data.dynamic_dataloader.DynamicTorchDataset
+    num_workers: ${num_workers}
+    max_img_per_gpu: ${max_img_per_gpu}
+    persistent_workers: True
+    common_config:
+      img_size: ${img_size}
+      patch_size: ${patch_size}
+      img_nums: [5, 5]
+      num_target_views: 1 # TODO: fix, does not do anything atm
+      debug: False
+      repeat_batch: False      
+      rescale: True
+      rescale_aug: False
+      augs:
+        cojitter: False
+        cojitter_ratio: 0.3
+        scales: null
+        aspects: [1.0, 1.0]
+        color_jitter: null
+        gray_scale: False
+        gau_blur: False
+
+    dataset:
+      _target_: data.composed_dataset.ComposedDataset
+      dataset_configs:
+        - _target_: data.datasets.uco3d.UCO3dDataset
+          split: train
+          DATASET_DIR: /storage/slurm/schnaus/dl4sai_2025/uco3d
+          SPLIT_FILE: /usr/prakt/s0016/vggt/training/train.json
+          # SPLIT_FILE: /storage/group/dataset_mirrors/uco3d/uco3d_raw/set_lists/static_accurate_train.json
+
+  val:
+    _target_: data.dynamic_dataloader.DynamicTorchDataset
+    num_workers: ${num_workers}
+    max_img_per_gpu: ${max_img_val}
+    persistent_workers: True
+    common_config:
+      img_size: ${img_size}
+      patch_size: ${patch_size}
+      debug: False
+      img_nums: [5, 5]
+      fix_aspect_ratio: 1.0
+      rescale: True
+    dataset:
+      _target_: data.composed_dataset.ComposedDataset
+      dataset_configs:
+        - _target_: data.datasets.uco3d.UCO3dDataset
+          split: test
+          DATASET_DIR: /storage/slurm/schnaus/dl4sai_2025/uco3d
+          SPLIT_FILE: /usr/prakt/s0016/vggt/training/test.json
+          # SPLIT_FILE: /storage/group/dataset_mirrors/uco3d/uco3d_raw/set_lists/static_accurate_val.json
+
+
+logging:
+  log_dir: logs_nvs_only_full_dataset_lr_sched
+  log_visuals: False
+  log_freq: 1
+  log_level_primary: DEBUG
+  log_level_secondary: WARNING
+  all_ranks: False
+  tensorboard_writer:
+    _target_: train_utils.tb_writer.TensorBoardLogger
+    path: ${logging.log_dir}/tensorboard
+  scalar_keys_to_log:
+    train:
+      keys_to_log:
+        - loss_objective
+        - loss_camera
+        - loss_T
+        - loss_R
+        - loss_FL
+        - loss_conf_depth
+        - loss_reg_depth
+        - loss_grad_depth
+        - NVS L2 loss
+        - train psnr
+        - NVS perceptual loss
+    val:
+      keys_to_log:
+        - loss_objective
+        - loss_camera
+        - loss_T
+        - loss_R
+        - loss_FL
+        - loss_conf_depth
+        - loss_reg_depth
+        - loss_grad_depth
+        - NVS L2 loss
+        - train psnr
+        - NVS perceptual loss
+
+
+
+checkpoint:
+  save_dir: logs_nvs_only_full_dataset_lr_sched/${exp_name}/ckpts
+  save_freq: 1
+  resume_checkpoint_path: null # /usr/prakt/s0016/vggt/training/logs_nvs_only_full_dataset/vggt_nvs_only/ckpts/checkpoint_7.pt
+  strict: False
+
+
+loss:
+  _target_: loss.MultitaskLoss
+  camera: null
+    # weight: 5.0
+    # loss_type: "l1" # The paper uses smooth l1 loss, but we found l1 loss is more stable than smooth l1 and l2 loss.  
+  depth: null
+    # weight: 1.0
+    # gradient_loss_fn: "grad" 
+    # valid_range: 0.98
+  point: null
+    # weight: 1.0
+    # gradient_loss_fn: "normal" 
+    # valid_range: 0.98
+  track: null
+  nvs:
+    l2_weight: 1.0
+    perceptual_weight: 1.0
+
+
+
+
+optim:
+  param_group_modifiers: False
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 1e-100 # <- This does not do anything unless the schedulers below are unset. 
+    weight_decay: 0.0
+
+  frozen_module_names:
+      # - "*aggregator*"  # example, freeze the aggregator
+
+  amp:
+    enabled: True
+    amp_dtype: bfloat16
+  gradient_clip:
+    _target_: train_utils.gradient_clip.GradientClipper
+    configs:
+      - module_name: ["aggregator"]
+        max_norm: 0.5   # feel free to reduce this if you see instabilities
+        norm_type: 2
+      # - module_name: ["depth"]
+      #   max_norm: 1.0   # feel free to reduce this if you see instabilities
+      #   norm_type: 2
+      # - module_name: ["camera"]
+      #   max_norm: 1.0   # feel free to reduce this if you see instabilities
+      #   norm_type: 2
+      # - module_name: ["point"]
+      #   max_norm: 1.0   # feel free to reduce this if you see instabilities
+      #   norm_type: 2
+      - module_name: ["nvs"]
+        max_norm: 0.5
+        norm_type: 2
+  options:
+    lr:
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.CompositeParamScheduler
+          schedulers:
+            - _target_: fvcore.common.param_scheduler.LinearParamScheduler
+              start_value: 1e-8
+              end_value: 5e-5
+            - _target_: fvcore.common.param_scheduler.CosineParamScheduler
+              start_value: 5e-5
+              end_value: 1e-8
+          lengths: [0.05, 0.95]
+          interval_scaling: ['rescaled', 'rescaled']
+        # param_names: ["aggregator*"]
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.CompositeParamScheduler
+          schedulers:
+            - _target_: fvcore.common.param_scheduler.LinearParamScheduler
+              start_value: 1e-6
+              end_value: 1e-4
+            - _target_: fvcore.common.param_scheduler.CosineParamScheduler
+              start_value: 1e-4
+              end_value: 1e-6
+          lengths: [0.05, 0.95]
+          interval_scaling: ['rescaled', 'rescaled']
+        param_names: ["nvs*", "aggregator.target_view_embed.*"]
+      
+    weight_decay:
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+          value: 0.05
+
+
+
+
+max_epochs: 20
+
+model:
+  _target_: vggt.models.vggt.VGGT
+  base_checkpoint: /usr/prakt/s0016/vggt-nvs/metric_checkpoint/vggt_1b/
+  enable_camera: False
+  enable_depth: False
+  enable_point: False
+  enable_track: False
+
+
+distributed:
+  # check https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html for options
+  backend: nccl
+  comms_dtype: None
+  find_unused_parameters: False
+  timeout_mins: 30
+  gradient_as_bucket_view: True  # Less memory used
+  bucket_cap_mb: 25
+  broadcast_buffers: True
+
+cuda:
+    cudnn_deterministic: False
+    cudnn_benchmark: False
+    allow_tf32: True
