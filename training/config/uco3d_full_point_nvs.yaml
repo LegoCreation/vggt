@@ -1,14 +1,14 @@
 defaults:
   - default_dataset.yaml
 
-exp_name: vggt_nvs_debug
+exp_name: vggt_nvs_only
 img_size: 224
 num_workers: 4
 seed_value: 42
 accum_steps: 16
 patch_size: 14
 val_epoch_freq: 5
-max_img_per_gpu: 640 # TODO: switch back to 80 for single
+max_img_per_gpu: 640
 max_img_val: 40
 
 limit_train_batches: 800
@@ -20,18 +20,19 @@ data:
     _target_: data.dynamic_dataloader.DynamicTorchDataset
     num_workers: ${num_workers}
     max_img_per_gpu: ${max_img_per_gpu}
+    persistent_workers: True
     common_config:
       img_size: ${img_size}
       patch_size: ${patch_size}
       img_nums: [5, 5]
       num_target_views: 1 # TODO: fix, does not do anything atm
-      debug: True
+      debug: False
       repeat_batch: False      
-      rescale: False
+      rescale: True
       rescale_aug: False
       augs:
         cojitter: False
-        cojitter_ratio: 0.5
+        cojitter_ratio: 0.3
         scales: null
         aspects: [1.0, 1.0]
         color_jitter: null
@@ -43,9 +44,8 @@ data:
       dataset_configs:
         - _target_: data.datasets.uco3d.UCO3dDataset
           split: train
-          DATASET_DIR: /storage/group/dataset_mirrors/uco3d/uco3d_preprocessed_new
+          DATASET_DIR: /storage/slurm/schnaus/dl4sai_2025/uco3d
           SPLIT_FILE: /usr/prakt/s0016/vggt/training/train.json
-          # SPLIT_FILE: /storage/group/dataset_mirrors/uco3d/uco3d_raw/set_lists/static_accurate_train.json
 
   val:
     _target_: data.dynamic_dataloader.DynamicTorchDataset
@@ -55,21 +55,21 @@ data:
     common_config:
       img_size: ${img_size}
       patch_size: ${patch_size}
-      debug: True
+      debug: False
       img_nums: [5, 5]
       fix_aspect_ratio: 1.0
+      rescale: True
     dataset:
       _target_: data.composed_dataset.ComposedDataset
       dataset_configs:
         - _target_: data.datasets.uco3d.UCO3dDataset
           split: test
-          DATASET_DIR: /storage/group/dataset_mirrors/uco3d/uco3d_preprocessed_new
+          DATASET_DIR: /storage/slurm/schnaus/dl4sai_2025/uco3d
           SPLIT_FILE: /usr/prakt/s0016/vggt/training/test.json
-          # SPLIT_FILE: /storage/group/dataset_mirrors/uco3d/uco3d_raw/set_lists/static_accurate_val.json
 
 
 logging:
-  log_dir: logs_debug_grad_accum_lr_5e5_single_batch
+  log_dir: logs_point_nvs
   log_visuals: False
   log_freq: 1
   log_level_primary: DEBUG
@@ -109,25 +109,25 @@ logging:
 
 
 checkpoint:
-  save_dir: logs_debug_grad_accum_lr_5e5_single_batch/${exp_name}/ckpts
+  save_dir: logs_point_nvs/${exp_name}/ckpts
   save_freq: 1
-  resume_checkpoint_path: null # /usr/prakt/s0016/vggt-nvs/metric_checkpoint/vggt_1b/model.safetensors
+  resume_checkpoint_path: null
   strict: False
 
 
 loss:
   _target_: loss.MultitaskLoss
   camera: null
-    # weight: 5.0
-    # loss_type: "l1" # The paper uses smooth l1 loss, but we found l1 loss is more stable than smooth l1 and l2 loss.  
+  #   weight: 5.0
+  #   loss_type: "l1" # The paper uses smooth l1 loss, but we found l1 loss is more stable than smooth l1 and l2 loss.  
   depth: null
-    # weight: 1.0
-    # gradient_loss_fn: "grad" 
-    # valid_range: 0.98
-  point: null
-    # weight: 1.0
-    # gradient_loss_fn: "normal" 
-    # valid_range: 0.98
+  #   weight: 1.0
+  #   gradient_loss_fn: "grad" 
+  #   valid_range: 0.98
+  point:
+    weight: 1.0
+    gradient_loss_fn: "normal" 
+    valid_range: 0.98
   track: null
   nvs:
     l2_weight: 1.0
@@ -141,7 +141,7 @@ optim:
 
   optimizer:
     _target_: torch.optim.AdamW
-    lr: 5e-4 # <- This does not do anything unless the schedulers below are unset. 
+    lr: 1e-100 # <- This does not do anything unless the schedulers below are unset. 
     weight_decay: 0.0
 
   frozen_module_names:
@@ -154,37 +154,51 @@ optim:
     _target_: train_utils.gradient_clip.GradientClipper
     configs:
       - module_name: ["aggregator"]
-        max_norm: 1.0   # feel free to reduce this if you see instabilities
+        max_norm: 0.5   # feel free to reduce this if you see instabilities
         norm_type: 2
       # - module_name: ["depth"]
-      #   max_norm: 1.0   # feel free to reduce this if you see instabilities
+      #   max_norm: 0.5   # feel free to reduce this if you see instabilities
       #   norm_type: 2
       # - module_name: ["camera"]
-      #   max_norm: 1.0   # feel free to reduce this if you see instabilities
+      #   max_norm: 0.5   # feel free to reduce this if you see instabilities
       #   norm_type: 2
-      # - module_name: ["point"]
-      #   max_norm: 1.0   # feel free to reduce this if you see instabilities
-      #   norm_type: 2
-      - module_name: ["nvs_head"]
-        max_norm: 1.0
+      - module_name: ["point"]
+        max_norm: 0.5   # feel free to reduce this if you see instabilities
         norm_type: 2
-  options: 
+      - module_name: ["nvs"]
+        max_norm: 0.5
+        norm_type: 2
+  options:
     lr:
       - scheduler:
           _target_: fvcore.common.param_scheduler.CompositeParamScheduler
           schedulers:
             - _target_: fvcore.common.param_scheduler.LinearParamScheduler
-              start_value: 5e-6
-              end_value: 5e-4
+              start_value: 1e-8
+              end_value: 5e-5
             - _target_: fvcore.common.param_scheduler.CosineParamScheduler
-              start_value: 5e-4
-              end_value: 5e-6
+              start_value: 5e-5
+              end_value: 1e-8
           lengths: [0.05, 0.95]
           interval_scaling: ['rescaled', 'rescaled']
+        # param_names: ["aggregator*"]
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.CompositeParamScheduler
+          schedulers:
+            - _target_: fvcore.common.param_scheduler.LinearParamScheduler
+              start_value: 1e-6
+              end_value: 1e-4
+            - _target_: fvcore.common.param_scheduler.CosineParamScheduler
+              start_value: 1e-4
+              end_value: 1e-6
+          lengths: [0.05, 0.95]
+          interval_scaling: ['rescaled', 'rescaled']
+        param_names: ["nvs*", "aggregator.target_view_embed.*"]
+      
     weight_decay:
       - scheduler:
           _target_: fvcore.common.param_scheduler.ConstantParamScheduler
-          value: 0.0
+          value: 0.05
 
 
 
@@ -196,7 +210,7 @@ model:
   base_checkpoint: /usr/prakt/s0016/vggt-nvs/metric_checkpoint/vggt_1b/
   enable_camera: False
   enable_depth: False
-  enable_point: False
+  enable_point: True
   enable_track: False
 
 
